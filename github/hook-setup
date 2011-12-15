@@ -1,0 +1,74 @@
+#!/usr/bin/env python
+# -*- mode: python -*-
+#
+# Copyright 2011 Christian Hofstaedtler.
+# Licensed under the MIT License
+#
+
+import httplib
+import json
+import sys, os.path
+import subprocess
+
+AUTH = 'Basic **********************'
+github_organization_name = 'grml'
+email_moderator_pass = '***********************'
+
+conn = None
+def reopenconn():
+  global conn
+  conn = httplib.HTTPSConnection("api.github.com")
+reopenconn()
+
+def query(url):
+  print url
+  conn.request("GET", url, "", headers={'Authorization': AUTH})
+  r1 = conn.getresponse()
+  if r1.status != 200:
+    print "Github API GET Request failed with:", r1.status, r1.reason
+    sys.exit(1)
+  return json.loads(r1.read())
+def post(url, data):
+  b = json.dumps(data)
+  conn.request("POST", url, b, headers={'Authorization': AUTH})
+  r1 = conn.getresponse()
+  if r1.status != 200 and r1.status != 201:
+    print "Github API POST Request failed, data:", url, b, "Status:", r1.status, r1.reason
+    sys.exit(1)
+  return json.loads(r1.read())
+def delete(url):
+  conn.putrequest('DELETE', url)
+  conn.putheader("Authorization", AUTH)
+  conn.endheaders()
+  r1 = conn.getresponse()
+  reopenconn()
+  if r1.status != 204:
+    print "Github API DELETE Request failed, data:", url, "Status:", r1.status, r1.reason
+    sys.exit(1)
+
+repos = query("/orgs/%s/repos" % github_organization_name)
+
+#repos = filter(lambda x: x['name']=='notifytest', repos)
+
+success = True
+
+for repo in repos:
+  name = repo['name']
+  git_url = repo['git_url']
+  hooks_url = "/repos/%s/%s/hooks" % (github_organization_name, name)
+  print name
+  old = query(hooks_url)
+  for el in old:
+    print el['name'], el['config']
+    if el['name'] == 'web':
+      delete(hooks_url + ('/%d' % el['id']))
+  post(hooks_url, {"name": "cia", "config": {"project": "grml", "branch": name + ":%s"}, "active": True})
+  dest_email = 'git-commits@ml.grml.org'
+  if name.startswith('gsa-'):
+    dest_email = 'admin@ml.grml.org'
+  post(hooks_url, {"name": "email", "config": {"address": dest_email, "secret": email_moderator_pass, "send_from_author": 1}, "active": True})
+  post(hooks_url, {"name": "web", "config": {'url': 'http://jenkins.grml.org/github-webhook/', 'content_type': 'form'}, "active": True})
+  post(hooks_url, {"name": "web", "config": {'url': 'http://buildhost.grml.org:8080/github-webhook/', 'content_type': 'form'}, "active": True})
+
+if not success:
+  sys.exit(1)
