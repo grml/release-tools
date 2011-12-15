@@ -1,0 +1,102 @@
+#!/usr/bin/env ruby
+require 'yaml'
+require 'net/http'
+require 'uri'
+require 'zlib'
+require 'yaml'
+
+def build_used_package_list(source_uri)
+  source_uri.map do |source_uri|
+    fetch_file(source_uri).split("\n").reject do |l|
+      l.strip.start_with?('#') or l.strip == ""
+    end
+  end.flatten
+end
+
+def parse_debian_sources(data)
+  data.split("\n").push('').inject({}) do |pkgs, l|
+    l.rstrip!
+    pkg = pkgs[:_tmp] || {}
+    if pkg[:_tmp]
+      if l[0..0] == ' '
+	pkg[:_tmp][:data] << l.strip
+      else
+	pkg[pkg[:_tmp][:hdr]] = pkg[:_tmp][:data].compact
+	pkg.delete :_tmp
+      end
+    end
+    unless pkg[:_tmp]
+      if l == ''
+	pkgs[pkg['Package'][0]] = pkg
+	pkg = nil
+      else
+	hdr, data = l.strip.split(':', 2)
+	data.strip! unless data.nil?
+	pkg[:_tmp] = {:hdr => hdr, :data => [data]}
+      end
+    end
+    if pkg.nil?
+      pkgs.delete :_tmp
+    else
+      pkgs[:_tmp] = pkg
+    end
+    pkgs
+  end
+end
+
+def parse_package_list(s)
+  h = Hash.new
+  s.split("\n").each do |line|
+    m = line.match /^ii\s+(\S+)\s+(\S+)\s/
+    if m
+      h[m[1]] = m[2]
+    end
+  end
+  h
+end
+
+def fetch_file(uri)
+  response = Net::HTTP.get_response(URI.parse(uri))
+  body = response.body
+  if uri.match(/\.gz$/)
+    body = Zlib::GzipReader.new(StringIO.new(body.to_s)).read
+  end
+  body
+end
+
+YAML::ENGINE.yamler = 'psych'
+$stdout.sync = true
+if File.exists?('binary-amd64.yml')
+  puts 'Loading testing packages cache'
+  sources = YAML.load_file 'binary-amd64.yml'
+else
+  print 'Building testing packages cache.'
+  sources = parse_debian_sources(fetch_file('http://debian.inode.at/debian/dists/testing/main/binary-amd64/Packages.gz'))
+  print '.'
+  sources.merge!(parse_debian_sources(fetch_file('http://debian.inode.at/debian/dists/testing/non-free/binary-amd64/Packages.gz')))
+  print '.'
+  sources.merge!(parse_debian_sources(fetch_file('http://debian.inode.at/debian/dists/testing/contrib/binary-amd64/Packages.gz')))
+  print '...'
+  File.open('binary-amd64.yml','w') do |f| f.write sources.to_yaml end
+  puts
+end
+
+if File.exists?('packages.yml')
+  packages = YAML.load_file 'packages.yml'
+else
+  puts 'Building release packages cache'
+  packages = parse_package_list(fetch_file('http://daily.grml.org:8080/job/grml64_Release/lastBuild/artifact/grml_logs/fai/dpkg.list'))
+  File.open('packages.yml','w') do |f| f.write packages.to_yaml end
+end
+
+packages.each do |p,grml_version|
+  if sources[p].nil?
+    next if p.match /^grml/
+    puts "#{p}: Not in testing"
+  else
+    testing_version = sources[p]['Version'][0]
+    if grml_version != testing_version
+      puts "#{p}: version changed: #{grml_version} -> #{testing_version}"
+    end
+  end
+end
